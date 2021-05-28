@@ -1,0 +1,216 @@
+# fbkeys
+
+<!--- @:~ --->
+<!--- ~='copyright notice' --->
+Copyright 2021 Travis West <travis@traviswest.ca>
+
+Initially based on fbkeyboard.c:
+    Copyright 2017 Julian Winkler <julia.winkler1@web.de>
+    Copyright 2020 Ferenc Bakonyi <bakonyi.ferenc@gmail.com>
+
+<!--- ~/ -->
+<!--- ~:@ -->
+<!--- @='license header' --->
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+<!--- @/ --->
+
+`fbkeys` is simple literate framebuffer softkeyboard for linux smartphones.
+`fbkeys` aims to be easier to understand and modify, more responsive, and more
+enjoyable to use than the main alternative, `fbkeyboard`. At the time of
+writing, `fbkeyboard` suffers from some severe limitations. 
+
+- lack of key repeat
+- buggy caps-lock-only shift and modifier behaviour
+- poor handling of fast typing
+- middling support for layout changes
+
+The main goal of `fbkeys` is to overcome these issues while maintaining the
+vanishingly simple build process, relative lack of dependencies, and small
+code-size of `fbkeyboard`.
+
+## why literate programming?
+
+In literate programming, the author adopts the view that writing a program is
+an act of communication with the human readers of the program first, and only
+secondarily about generating executable machine code. This practice transforms
+enhances the value offered by a program by improving the quality of the code
+written and enriching the reader with a deeper and more comprehensive
+understanding of the code.
+
+For more information, read [the literate source code for
+`lilit`](https://github.com/DocSunset/lilit), the tool used to produce machine
+code from this document.
+
+# usage notes
+
+```c
+// @='help text'
+const char * help =
+"\n\
+fbkeys: a simple literate framebuffer softkeyboard -- version %s\n\
+usage: %s [-h] [-d inputdevice] [-f font] [-r rotation]\n\
+options:\n\
+  -h  print this help text\n\
+  -d  path to the touchscreen device to read for typing events\n\
+      if none is given, fbkeys will use the first available device with\n\
+      absolute coordinate axes.\n\
+  -f  path to the font to use to render the keys\n\
+      defaults to: '/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf'\n\
+  -r  an integer representing the rotation of the screen\n\
+      defaults to no rotation\n\
+\n";
+// @/
+```
+
+building:
+
+`make`
+
+dependencies:
+
+- linux headers
+- freetype2
+- (optional, build only) lilit
+
+installation:
+
+Copy `fbkeys` into your PATH, e.g. `/usr/local/bin`.
+
+# program overview
+
+```c
+// @#'fbkeys.c'
+/*
+ * fbkeys.c : a simple literate framebuffer softkeyboard
+ *
+ * @{copyright notice}
+ * @{license header}
+ */
+
+@{includes}
+@{global variables}
+@{functions}
+
+int main(int argc, char ** argv)
+{
+    @{main-local variables}
+    @{initialize freetype}
+    @{initialize input device}
+    @{initialize output device}
+    @{initialize framebuffer device}
+
+    while(!done)
+    {
+        @{loop-local variables}
+        @{read touchscreen}
+        @{update keyboard state}
+        @{output keypresses}
+        @{draw keyboard}
+    }
+
+    return 0;
+}
+// @/
+```
+
+# implementation
+
+## the framebuffer
+
+###setup
+
+The framebuffer device (fbdev) is a special file that represents a graphical
+display in a hardware agnostically, allowing the contents of the display to be
+viewed and edited using file read/write operations and ioctls without having to
+know anything about the specific hardware involved. The most familiar use of
+the framebuffer is to draw an image (e.g. Tux the penguin) during the boot
+sequence. The framebuffer is convenient for our purposes since it is one of the
+simplest ways to draw arbitrary graphics on the screen without a graphical
+environment.
+
+There are three aspects of the fbdev API relevant to this program: fixed screen
+info, variable screen info, and the fbdev file itself. [The screen info
+structures](https://www.kernel.org/doc/html/latest/fb/api.html#screen-information)
+are documented in the linux kernel docs
+[here](https://www.kernel.org/doc/html/latest/fb/api.html#screen-information).
+At the time of writing, we are able to ignore most of this information, I
+suspect because the program is only run on a few hardware devices (e.g. the
+Pinephone); the only fields we care about are those that tell us the screen's
+resolution and the length of one line in bytes. This information, along with
+the framebuffer device file description, are saved globally as long as there
+are no errors collecting the information.
+
+```c
+// @+'includes'
+#include <stddef.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/fb.h>
+// @/
+
+// @+'global variables'
+struct
+{
+    int file;
+    unsigned int width;       /* in pixels */
+    unsigned int height;      /* in pixels */
+    unsigned int line_length; /* in bytes  */
+    char * buffer;
+    size_t buffer_length;
+} framebuffer;
+// @/
+
+// @='initialize framebuffer device'
+{
+    struct fb_var_screeninfo vinfo;
+    struct fb_fix_screeninfo finfo;
+
+    framebuffer.file = open("/dev/fb0", O_RDWR);
+    exit_fail_if (framebuffer.file == -1,
+            "error opening framebuffer device /dev/fb0");
+    exit_fail_if (ioctl(framebuffer.file, FBIOGET_FSCREENINFO, &finfo) == -1,
+            "error reading fixed framebuffer information");
+    exit_fail_if (ioctl(framebuffer.file, FBIOGET_VSCREENINFO, &vinfo) == -1,
+            "error reading fixed framebuffer information");
+
+    framebuffer.width  = vinfo.xres;
+    framebuffer.height = vinfo.yres;
+    framebuffer.line_length = finfo.line_length;
+}
+// @/
+```
+
+
+
+@+'global variables'
+int done = 0;
+@/
+
+@+'includes'
+#include <stdlib.h>
+#include <stdarg.h>
+#include <stdio.h>
+@/
+
+@+'functions'
+void exit_fail_if(int condition, char * message, ...)
+{
+    if (!condition) return;
+    va_list args;
+    va_start(args, message);
+    vfprintf(stderr, message, args);
+    va_end(args);
+    exit(EXIT_FAILURE);
+}
+@/
