@@ -140,7 +140,7 @@ int main(int argc, char ** argv)
 @{help text}
 char * device = NULL;
 char * font = "/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf";
-int rotate = 0; 
+int rotate = -1; 
 // @/
 
 // @='parse args'
@@ -170,6 +170,16 @@ int rotate = 0;
             fprintf(stderr, "unrecognized option -%c\n", optopt);
             break;
         }
+    }
+
+    if (device == NULL)
+    {
+        @{get default device}
+    }
+
+    if (rotate == -1)
+    {
+        @{get default rotation}
     }
 }
 // @/
@@ -241,7 +251,7 @@ debug_printf("framebuffer line length: %d\n", framebuffer.line_length);
 // @/
 ```
 
-Depending on the user specified rotation of the keyboard, the dimensions of the
+Depending on the rotation of the keyboard, the dimensions of the
 keyboard area are determined and a buffer is allocated to hold the bitmap.
 
 ```c
@@ -290,10 +300,41 @@ debug_printf("keyboard width:       %d\n", keyboard.width);
 debug_printf("keyboard row height:  %d\n", keyboard.row_height);
 debug_printf("keyboard line length: %d\n", keyboard.line_length);
 debug_printf("keyboard bitmap size: %d\n", keyboard.bitmap_size);
+
+{
+size_t scanline;
+memset(keyboard.bitmap, ~0, keyboard.bitmap_size);
+for(scanline = 0; scanline < keyboard.width; ++scanline)
+{
+    lseek(framebuffer.file, scanline * framebuffer.line_length, SEEK_SET);
+    write(framebuffer.file, keyboard.bitmap + keyboard.line_length * scanline, keyboard.line_length);
+}
+}
 // @/
+
+@+'includes'
+#include <string.h>
+@/
 ```
 
+The rotation can be specified at the command line. In case none is given, the
+default value is set based on inspecting "/sys/class/graphics/fbcon/rotate"
 
+```c
+// @+'includes'
+#include <ctype.h>
+// @/
+
+// @='get default rotation'
+char r;
+int f = open("/sys/class/graphics/fbcon/rotate", O_RDONLY);
+exit_fail_if (f == -1, "error opening fbcon/rotate");
+exit_fail_if (read(f, &r, 1) != 1, "error reading fbcon/rotate");
+exit_fail_if (!isdigit(r), 
+        "error: reading from fbcom/rotate '%c' is not a digit???", r);
+rotate = (r - '0') % 4;
+// @/
+```
 
 @+'global variables'
 int done = 0;

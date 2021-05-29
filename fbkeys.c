@@ -28,6 +28,8 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <linux/fb.h>
+#include <string.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -47,7 +49,7 @@ options:\n\
 \n";
 char * device = NULL;
 char * font = "/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf";
-int rotate = 0; 
+int rotate = -1; 
 struct
 {
     int file;
@@ -115,6 +117,21 @@ int main(int argc, char ** argv)
                 break;
             }
         }
+
+        if (device == NULL)
+        {
+        }
+
+        if (rotate == -1)
+        {
+            char r;
+            int f = open("/sys/class/graphics/fbcon/rotate", O_RDONLY);
+            exit_fail_if (f == -1, "error opening fbcon/rotate");
+            exit_fail_if (read(f, &r, 1) != 1, "error reading fbcon/rotate");
+            exit_fail_if (!isdigit(r), 
+                    "error: reading from fbcom/rotate '%c' is not a digit???", r);
+            rotate = (r - '0') % 4;
+        }
     }
     {
         struct fb_var_screeninfo vinfo;
@@ -166,6 +183,16 @@ int main(int argc, char ** argv)
     debug_printf("keyboard row height:  %d\n", keyboard.row_height);
     debug_printf("keyboard line length: %d\n", keyboard.line_length);
     debug_printf("keyboard bitmap size: %d\n", keyboard.bitmap_size);
+
+    {
+    size_t scanline;
+    memset(keyboard.bitmap, ~0, keyboard.bitmap_size);
+    for(scanline = 0; scanline < keyboard.width; ++scanline)
+    {
+        lseek(framebuffer.file, scanline * framebuffer.line_length, SEEK_SET);
+        write(framebuffer.file, keyboard.bitmap + keyboard.line_length * scanline, keyboard.line_length);
+    }
+    }
 
     while(!done)
     {
