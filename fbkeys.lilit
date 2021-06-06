@@ -59,7 +59,7 @@ code from this document.
 const char * help =
 "\n\
 fbkeys: a simple literate framebuffer softkeyboard -- version %s\n\
-usage: %s [-h] [-d inputdevice] [-f font] [-r rotation]\n\
+usage: %s [-h] [-d inputdevice] [-f font]\n\
 options:\n\
   -h  print this help text\n\
   -d  path to the touchscreen device\n\
@@ -67,8 +67,6 @@ options:\n\
       absolute coordinate axes.\n\
   -f  path to the font to use to render the keys\n\
       defaults to: '/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf'\n\
-  -r  an integer representing the rotation of the screen\n\
-      defaults to no rotation\n\
 \n";
 // @/
 ```
@@ -154,7 +152,6 @@ char * font = "/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf";
 {
     char c;
     char * p = NULL;
-    keyboard.rotation = -1
     touchscreen.path = NULL;
     while ((c = getopt(argc, argv, "d:f:r:h")) != (char) -1) 
     {
@@ -166,12 +163,6 @@ char * font = "/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf";
         case 'f':
             font = optarg;
             break;
-        case 'r':
-            errno = 0;
-            keyboard.rotation = strtol(optarg, &p, 10) % 4;
-            exit_fail_if (errno != 0 || p == optarg || p == NULL || *p != '\0',
-                    "error: invalid numeric value for -r option, '%s'\n",
-                    optarg);
         case 'h':
             printf(help, VERSION, argv[0]);
             exit(0);
@@ -184,11 +175,6 @@ char * font = "/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf";
     if (touchscreen.path == NULL)
     {
         @{get default touchscreen.path}
-    }
-
-    if (keyboard.rotation == -1)
-    {
-        @{get default rotation}
     }
 }
 // @/
@@ -258,94 +244,30 @@ debug_printf("framebuffer line length: %d\n", framebuffer.line_length);
 // @/
 ```
 
-Depending on the rotation of the keyboard, the dimensions of the
-keyboard area are determined and a buffer is allocated to hold the bitmap.
+Based on the framebuffer dimensions, we can calculate the dimensions of the
+keyboard, which will come in handy later.
 
 ```c
 // @+'global variables'
 struct
 {
-    int rotation;
-    int landscape;
     int width;
+    int height;
     int row_height;
     int touch_row_height;
-    int line_length;
-    char * bitmap;
-    size_t bitmap_size;
 } keyboard;
 // @/
 
 // @+'initialize framebuffer device'
-switch(keyboard.rotation)
-{
-    case FB_ROTATE_UR:
-    case FB_ROTATE_UD:
-        keyboard.landscape = framebuffer.height < framebuffer.width;
-        keyboard.width = framebuffer.width;
-        keyboard.row_height = framebuffer.height / (keyboard.landscape ? 2 : 3) / 5;
-        keyboard.touch_row_height = keyboard.row_height * 0x10000 / framebuffer.height;
-        keyboard.line_length = framebuffer.line_length;
-        keyboard.bitmap_size = framebuffer.line_length * (keyboard.row_height * 5 + 1);
-        break;
+keyboard.width = framebuffer.width;
+keyboard.height = framebuffer.height / 3;
+keyboard.row_height = keyboard.height / 5;
+keyboard.touch_row_height = keyboard.row_height * 0x10000 / framebuffer.height;
 
-    case FB_ROTATE_CW:
-    case FB_ROTATE_CCW:
-    	keyboard.landscape = framebuffer.height > framebuffer.width;
-    	keyboard.width = framebuffer.height;
-    	keyboard.row_height = framebuffer.width / (keyboard.landscape ? 2 : 3) / 5;
-    	keyboard.touch_row_height = keyboard.row_height * 0x10000 / framebuffer.width;
-    	keyboard.line_length = keyboard.row_height * 5 * 4;
-    	keyboard.bitmap_size = keyboard.width * 4 * (keyboard.row_height * 5 + 1);
-    	break;
-}
-keyboard.bitmap = malloc(keyboard.bitmap_size);
-exit_fail_if(keyboard.bitmap == NULL, 
-        "error: failed to allocate drawing bitmap");
-debug_printf("keyboard landscape:   %d\n", keyboard.landscape);
 debug_printf("keyboard width:       %d\n", keyboard.width);
+debug_printf("keyboard height:      %d\n", keyboard.height);
 debug_printf("keyboard row height:  %d\n", keyboard.row_height);
-debug_printf("keyboard line length: %d\n", keyboard.line_length);
-debug_printf("keyboard bitmap size: %d\n", keyboard.bitmap_size);
 // @/
-
-@+'includes'
-#include <string.h>
-@/
-```
-
-The rotation can be specified at the command line using the appropriate flag,
-documented above. In case none is given, the default value is set based on
-reading "/sys/class/graphics/fbcon/rotate", which states the current rotation
-of the framebuffer console. The rotation is expected to be one of the ASCII
-character from '0' to '3'; subtracting this character from ASCII '0'
-effectively converts from the ASCII representation to an integer numerical
-representation (1). The range of this integer is checked to conform to
-expectation. In case it doesn't, there isn't really an ideal course of action
-to deal with this (2). A warning is issued and the unexpected value is coerced
-into the expected range, but probably the developer should look into it if this
-ever happens.
-
-```c
-// @+'includes'
-#include <ctype.h>
-// @/
-
-// @='get default rotation'
-char r;
-int f = open("/sys/class/graphics/fbcon/rotate", O_RDONLY);
-exit_fail_if (f == -1, "error opening fbcon/rotate");
-exit_fail_if (read(f, &r, 1) != 1, "error reading fbcon/rotate");
-exit_fail_if (!isdigit(r), 
-        "error: reading from fbcom/rotate '%c' is not a digit???", r);
-keyboard.rotation = r - '0'; /* (1), convert ASCII to integer */
-if (keyboard.rotation < 0 || keyboard.rotation > 3) /* (2) */
-{
-    fprintf(stderr, "warning: unexpected value in fbcon/rotate, '%d'. Please contact the developer.\n", keyboard.rotation);
-    keyboard.rotation = keyboard.rotation % 4;
-}
-// @/
-```
 
 ### input device
 
