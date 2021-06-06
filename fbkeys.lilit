@@ -105,19 +105,12 @@ Copy `fbkeys` into your PATH, e.g. `/usr/local/bin`.
 int main(int argc, char ** argv)
 {
     @{main-local variables}
-    @{parse args}
-    @{initialize freetype}
-    @{initialize input device}
-    @{initialize output device}
-    @{initialize framebuffer device}
+    @{setup}
 
     while(!done)
     {
         @{loop-local variables}
-        @{read touchscreen}
-        @{update keyboard state}
-        @{output keypresses}
-        @{draw keyboard}
+        @{loop}
     }
 
     return 0;
@@ -127,7 +120,23 @@ int main(int argc, char ** argv)
 
 # implementation
 
-## arguments
+## setup
+
+```c
+// @='setup'
+@{parse args}
+@{initialize framebuffer device}
+@{initialize freetype}
+@{initialize input device}
+@{initialize output device}
+// @/
+```
+
+### arguments
+
+The supported command line arguments are described in the help text, copied
+above.  These flags serve to override the default devices used by the program
+for input and output.
 
 ```c
 // @+'includes'
@@ -138,28 +147,28 @@ int main(int argc, char ** argv)
 
 // @+'global variables'
 @{help text}
-char * device = NULL;
 char * font = "/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf";
-int rotate = -1; 
 // @/
 
 // @='parse args'
 {
     char c;
     char * p = NULL;
+    keyboard.rotation = -1
+    touchscreen.path = NULL;
     while ((c = getopt(argc, argv, "d:f:r:h")) != (char) -1) 
     {
         switch (c) 
         {
         case 'd':
-            device = optarg;
+            touchscreen.path = optarg;
             break;
         case 'f':
             font = optarg;
             break;
         case 'r':
             errno = 0;
-            rotate = strtol(optarg, &p, 10) % 4;
+            keyboard.rotation = strtol(optarg, &p, 10) % 4;
             exit_fail_if (errno != 0 || p == optarg || p == NULL || *p != '\0',
                     "error: invalid numeric value for -r option, '%s'\n",
                     optarg);
@@ -172,12 +181,12 @@ int rotate = -1;
         }
     }
 
-    if (device == NULL)
+    if (touchscreen.path == NULL)
     {
-        @{get default device}
+        @{get default touchscreen.path}
     }
 
-    if (rotate == -1)
+    if (keyboard.rotation == -1)
     {
         @{get default rotation}
     }
@@ -185,9 +194,7 @@ int rotate = -1;
 // @/
 ```
 
-## the framebuffer
-
-###setup
+### the framebuffer
 
 The framebuffer device (fbdev) is a special file that represents a graphical
 display in a hardware agnostically, allowing the contents of the display to be
@@ -258,6 +265,7 @@ keyboard area are determined and a buffer is allocated to hold the bitmap.
 // @+'global variables'
 struct
 {
+    int rotation;
     int landscape;
     int width;
     int row_height;
@@ -269,7 +277,7 @@ struct
 // @/
 
 // @+'initialize framebuffer device'
-switch(rotate)
+switch(keyboard.rotation)
 {
     case FB_ROTATE_UR:
     case FB_ROTATE_UD:
@@ -294,22 +302,11 @@ switch(rotate)
 keyboard.bitmap = malloc(keyboard.bitmap_size);
 exit_fail_if(keyboard.bitmap == NULL, 
         "error: failed to allocate drawing bitmap");
-
 debug_printf("keyboard landscape:   %d\n", keyboard.landscape);
 debug_printf("keyboard width:       %d\n", keyboard.width);
 debug_printf("keyboard row height:  %d\n", keyboard.row_height);
 debug_printf("keyboard line length: %d\n", keyboard.line_length);
 debug_printf("keyboard bitmap size: %d\n", keyboard.bitmap_size);
-
-{
-size_t scanline;
-memset(keyboard.bitmap, ~0, keyboard.bitmap_size);
-for(scanline = 0; scanline < keyboard.width; ++scanline)
-{
-    lseek(framebuffer.file, scanline * framebuffer.line_length, SEEK_SET);
-    write(framebuffer.file, keyboard.bitmap + keyboard.line_length * scanline, keyboard.line_length);
-}
-}
 // @/
 
 @+'includes'
@@ -317,8 +314,17 @@ for(scanline = 0; scanline < keyboard.width; ++scanline)
 @/
 ```
 
-The rotation can be specified at the command line. In case none is given, the
-default value is set based on inspecting "/sys/class/graphics/fbcon/rotate"
+The rotation can be specified at the command line using the appropriate flag,
+documented above. In case none is given, the default value is set based on
+reading "/sys/class/graphics/fbcon/rotate", which states the current rotation
+of the framebuffer console. The rotation is expected to be one of the ASCII
+character from '0' to '3'; subtracting this character from ASCII '0'
+effectively converts from the ASCII representation to an integer numerical
+representation (1). The range of this integer is checked to conform to
+expectation. In case it doesn't, there isn't really an ideal course of action
+to deal with this (2). A warning is issued and the unexpected value is coerced
+into the expected range, but probably the developer should look into it if this
+ever happens.
 
 ```c
 // @+'includes'
@@ -332,9 +338,85 @@ exit_fail_if (f == -1, "error opening fbcon/rotate");
 exit_fail_if (read(f, &r, 1) != 1, "error reading fbcon/rotate");
 exit_fail_if (!isdigit(r), 
         "error: reading from fbcom/rotate '%c' is not a digit???", r);
-rotate = (r - '0') % 4;
+keyboard.rotation = r - '0'; /* (1), convert ASCII to integer */
+if (keyboard.rotation < 0 || keyboard.rotation > 3) /* (2) */
+{
+    fprintf(stderr, "warning: unexpected value in fbcon/rotate, '%d'. Please contact the developer.\n", keyboard.rotation);
+    keyboard.rotation = keyboard.rotation % 4;
+}
 // @/
 ```
+
+### input device
+
+The user may specify what device to open for reading touch inputs using a
+command line flag. If one is not given, the default behaviour is to search for
+a device that provides absolute input axes, and use the first such device
+found. This is acheived by opening a directory stream at "/dev/input" (1), and
+iterating over the files in that directory (2) until one is found with "EV_ABS"
+capabilities (3), i.e. any device with absolute coordinate axes is assumed to
+be the touchscreen.
+
+```c
+// @+'includes'
+#include<dirent.h>
+// @/
+
+// @+'global variables'
+struct
+{
+    char * path;
+    int file;
+} touchscreen;
+// @/
+
+// @='get default touchscreen.path'
+DIR * dev_input_dir = opendir("/dev/input"); /* (1) */
+struct dirent *dptr;
+exit_fail_if (dev_input_dir == NULL, "error opening '/dev/input' directory");
+touchscreen.file = -1;
+
+while ((dptr = readdir(dev_input_dir)) != NULL) /* (2.a) */
+{
+    touchscreen.file = openat(dirfd(dev_input_dir), dptr->d_name, O_RDONLY); /* (2.b) */
+    if (touchscreen.file != -1)
+    {
+        int io_ret = ioctl(touchscreen.file, EVIOCGBIT(0, sizeof(key)), &key);
+        if (io_ret != -1 && key >> EV_ABS & 1) break; /* (3) */
+        /* otherwise */
+        close(touchscreen.file)
+        touchscreen.file = -1;
+    }
+}
+exit_fail_if (touchscreen.file == -1, 
+        "error: no touchscreen device found in /dev/input\n");
+// @/
+```
+
+### output device
+
+### freetype
+
+## main loop
+
+```c
+// @='loop'
+@{read touchscreen}
+@{update keyboard state}
+@{output keystrokes}
+@{draw keyboard}
+// @/
+```
+
+### read touchscreen
+
+### update keyboard state
+
+### output keystrokes
+
+### draw keyboard
+
+## minutae
 
 @+'global variables'
 int done = 0;
