@@ -21,22 +21,25 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#define _GNU_SOURCE
 #include <unistd.h>
 #include <getopt.h>
 #include <errno.h>
 #include <stddef.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <linux/fb.h>
-#include <string.h>
-#include <ctype.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <linux/input.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
 const char * help =
 "\n\
 fbkeys: a simple literate framebuffer softkeyboard -- version %s\n\
-usage: %s [-h] [-d inputdevice] [-f font] [-r rotation]\n\
+usage: %s [-h] [-d inputdevice] [-f font]\n\
 options:\n\
   -h  print this help text\n\
   -d  path to the touchscreen device\n\
@@ -44,12 +47,8 @@ options:\n\
       absolute coordinate axes.\n\
   -f  path to the font to use to render the keys\n\
       defaults to: '/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf'\n\
-  -r  an integer representing the rotation of the screen\n\
-      defaults to no rotation\n\
 \n";
-char * device = NULL;
 char * font = "/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf";
-int rotate = -1; 
 struct
 {
     int file;
@@ -59,14 +58,16 @@ struct
 } framebuffer;
 struct
 {
-    int landscape;
     int width;
+    int height;
     int row_height;
     int touch_row_height;
-    int line_length;
-    char * bitmap;
-    size_t bitmap_size;
 } keyboard;
+struct
+{
+    char * path;
+    int file;
+} touchscreen;
 int done = 0;
 void exit_fail_if(int condition, char * message, ...)
 {
@@ -92,23 +93,17 @@ int main(int argc, char ** argv)
 {
     {
         char c;
-        char * p = NULL;
+        touchscreen.path = NULL;
         while ((c = getopt(argc, argv, "d:f:r:h")) != (char) -1) 
         {
             switch (c) 
             {
             case 'd':
-                device = optarg;
+                touchscreen.path = optarg;
                 break;
             case 'f':
                 font = optarg;
                 break;
-            case 'r':
-                errno = 0;
-                rotate = strtol(optarg, &p, 10) % 4;
-                exit_fail_if (errno != 0 || p == optarg || p == NULL || *p != '\0',
-                        "error: invalid numeric value for -r option, '%s'\n",
-                        optarg);
             case 'h':
                 printf(help, VERSION, argv[0]);
                 exit(0);
@@ -118,19 +113,30 @@ int main(int argc, char ** argv)
             }
         }
 
-        if (device == NULL)
+        if (touchscreen.path == NULL)
         {
-        }
+            DIR * dev_input_dir = opendir("/dev/input"); /* (1) */
+            struct dirent *dptr;
+            exit_fail_if (dev_input_dir == NULL, "error opening '/dev/input' directory");
+            touchscreen.file = -1;
 
-        if (rotate == -1)
-        {
-            char r;
-            int f = open("/sys/class/graphics/fbcon/rotate", O_RDONLY);
-            exit_fail_if (f == -1, "error opening fbcon/rotate");
-            exit_fail_if (read(f, &r, 1) != 1, "error reading fbcon/rotate");
-            exit_fail_if (!isdigit(r), 
-                    "error: reading from fbcom/rotate '%c' is not a digit???", r);
-            rotate = (r - '0') % 4;
+            while ((dptr = readdir(dev_input_dir)) != NULL) /* (2.a) */
+            {
+                touchscreen.file = openat(dirfd(dev_input_dir), dptr->d_name, O_RDONLY); /* (2.b) */
+                if (touchscreen.file != -1)
+                {
+                    int capabilities;
+                    int io_ret = ioctl(touchscreen.file, 
+                            EVIOCGBIT(0, sizeof(capabilities)), 
+                            &capabilities);
+                    if (io_ret != -1 && capabilities >> EV_ABS & 1) break; /* (3) */
+                    /* otherwise */
+                    close(touchscreen.file);
+                    touchscreen.file = -1;
+                }
+            }
+            exit_fail_if (touchscreen.file == -1, 
+                    "error: no touchscreen device found in /dev/input\n");
         }
     }
     {
@@ -152,47 +158,14 @@ int main(int argc, char ** argv)
     debug_printf("framebuffer width:       %d\n", framebuffer.width);
     debug_printf("framebuffer height:      %d\n", framebuffer.height);
     debug_printf("framebuffer line length: %d\n", framebuffer.line_length);
-    switch(rotate)
-    {
-        case FB_ROTATE_UR:
-        case FB_ROTATE_UD:
-            keyboard.landscape = framebuffer.height < framebuffer.width;
-            keyboard.width = framebuffer.width;
-            keyboard.row_height = framebuffer.height / (keyboard.landscape ? 2 : 3) / 5;
-            keyboard.touch_row_height = keyboard.row_height * 0x10000 / framebuffer.height;
-            keyboard.line_length = framebuffer.line_length;
-            keyboard.bitmap_size = framebuffer.line_length * (keyboard.row_height * 5 + 1);
-            break;
+    keyboard.width = framebuffer.width;
+    keyboard.height = framebuffer.height / 3;
+    keyboard.row_height = keyboard.height / 5;
+    keyboard.touch_row_height = keyboard.row_height * 0x10000 / framebuffer.height;
 
-        case FB_ROTATE_CW:
-        case FB_ROTATE_CCW:
-        	keyboard.landscape = framebuffer.height > framebuffer.width;
-        	keyboard.width = framebuffer.height;
-        	keyboard.row_height = framebuffer.width / (keyboard.landscape ? 2 : 3) / 5;
-        	keyboard.touch_row_height = keyboard.row_height * 0x10000 / framebuffer.width;
-        	keyboard.line_length = keyboard.row_height * 5 * 4;
-        	keyboard.bitmap_size = keyboard.width * 4 * (keyboard.row_height * 5 + 1);
-        	break;
-    }
-    keyboard.bitmap = malloc(keyboard.bitmap_size);
-    exit_fail_if(keyboard.bitmap == NULL, 
-            "error: failed to allocate drawing bitmap");
-
-    debug_printf("keyboard landscape:   %d\n", keyboard.landscape);
     debug_printf("keyboard width:       %d\n", keyboard.width);
+    debug_printf("keyboard height:      %d\n", keyboard.height);
     debug_printf("keyboard row height:  %d\n", keyboard.row_height);
-    debug_printf("keyboard line length: %d\n", keyboard.line_length);
-    debug_printf("keyboard bitmap size: %d\n", keyboard.bitmap_size);
-
-    {
-    size_t scanline;
-    memset(keyboard.bitmap, ~0, keyboard.bitmap_size);
-    for(scanline = 0; scanline < keyboard.width; ++scanline)
-    {
-        lseek(framebuffer.file, scanline * framebuffer.line_length, SEEK_SET);
-        write(framebuffer.file, keyboard.bitmap + keyboard.line_length * scanline, keyboard.line_length);
-    }
-    }
 
     while(!done)
     {

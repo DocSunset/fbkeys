@@ -96,6 +96,7 @@ Copy `fbkeys` into your PATH, e.g. `/usr/local/bin`.
  * @{license header}
  */
 
+#define _GNU_SOURCE
 @{includes}
 @{global variables}
 @{functions}
@@ -151,7 +152,6 @@ char * font = "/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf";
 // @='parse args'
 {
     char c;
-    char * p = NULL;
     touchscreen.path = NULL;
     while ((c = getopt(argc, argv, "d:f:r:h")) != (char) -1) 
     {
@@ -206,6 +206,7 @@ are no errors collecting the information.
 ```c
 // @+'includes'
 #include <stddef.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <linux/fb.h>
@@ -281,7 +282,9 @@ be the touchscreen.
 
 ```c
 // @+'includes'
-#include<dirent.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <linux/input.h>
 // @/
 
 // @+'global variables'
@@ -303,10 +306,13 @@ while ((dptr = readdir(dev_input_dir)) != NULL) /* (2.a) */
     touchscreen.file = openat(dirfd(dev_input_dir), dptr->d_name, O_RDONLY); /* (2.b) */
     if (touchscreen.file != -1)
     {
-        int io_ret = ioctl(touchscreen.file, EVIOCGBIT(0, sizeof(key)), &key);
-        if (io_ret != -1 && key >> EV_ABS & 1) break; /* (3) */
+        int capabilities;
+        int io_ret = ioctl(touchscreen.file, 
+                EVIOCGBIT(0, sizeof(capabilities)), 
+                &capabilities);
+        if (io_ret != -1 && capabilities >> EV_ABS & 1) break; /* (3) */
         /* otherwise */
-        close(touchscreen.file)
+        close(touchscreen.file);
         touchscreen.file = -1;
     }
 }
